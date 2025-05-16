@@ -1,0 +1,1567 @@
+---
+title: "Analysis"
+author: "Fatih Özhasar"
+date: "2025-01-11"
+output: html_document
+---
+
+# Set up
+
+```{r setup, include=FALSE}
+
+## clean environment
+rm(list = ls())
+
+
+
+# Define which packages needed for analyses
+p_needed <-
+  c("knitr",
+    "dplyr",
+    "tidyr",
+    "stargazer",
+    "car",
+    "ggplot2",
+    "viridis",
+    "rsample",
+    "MASS",
+    "lme4",
+    "devtools",
+    "remotes",
+    "haven",
+    "modelsummary",
+    "ggmap",
+    "maps",
+    "data.table",
+    "texreg", 
+    "fastDummies",
+    "margins",
+    "psych",
+    "gt",
+    "glm2",
+    "separationplot",
+    "pcse",
+    "plm",
+    "marginaleffects",
+    "interactions",
+    "pbnfd",
+    "zoo",
+    "margins",
+    "boot",
+    "tseries",
+    "urca",
+    "brms",
+    "sandwich",
+    "lmtest",
+    "ineq",
+    "panelAR",
+    "interplot",
+    "margins",
+    "quantreg",
+    "vars")
+
+# Check which packages are already installed on your computer
+packages <- rownames(installed.packages())
+
+# Check which packages are not installed
+p_to_install <- p_needed[!(p_needed %in% packages)]
+
+if (length(p_to_install) > 0) {
+  utils::install.packages(p_to_install)
+}
+sapply(p_needed, require, character.only = TRUE)
+
+
+# Set an option for the final document that can be produced from the .Rmd file.
+knitr::opts_chunk$set(echo = TRUE)
+
+## For replicability: session information 
+session_info <- print(sessionInfo())
+
+
+```
+
+
+#1. Load data
+
+```{r load data}
+#-------------------------------------------------------------------------------
+## Load the data
+#-------------------------------------------------------------------------------
+load("~/Desktop/THESIS R CODE/Thesis_Analysis/d.RData")
+
+# List of countries to remove
+countries_to_remove <- c("Jamaica", "Vanuatu", "Zambia", "Thailand", 
+                         "Timor-Leste", "Namibia", "Nepal", "Cyprus", "Bangladesh", "Kosovo")
+
+# Filter the dataset to exclude these countries
+d_clean <- d[!d$country %in% countries_to_remove, ]
+
+# View the cleaned dataset
+summary(d_clean)
+
+d <- d_clean
+
+# Check the current class of the year variable
+class(d$year)
+
+# Convert the year variable to numeric
+d$year <- as.character(d$year)
+
+# Confirm the conversion
+class(d$year)
+```
+
+
+```{r load data}
+# Define the range of years
+start_year <- 2001
+end_year <- 2023
+
+# Filter countries with complete data for all years in the range
+d_filtered <- d %>%
+  group_by(country) %>%
+  filter(all(seq(start_year, end_year) %in% year)) %>%
+  ungroup()
+
+# Check the filtered dataset
+print(d_filtered)
+
+d <- d_filtered
+incomplete_countries <- d %>%
+  group_by(country) %>%
+  summarise(missing_years = setdiff(seq(start_year, end_year), year)) %>%
+  filter(lengths(missing_years) > 0)
+
+print(incomplete_countries)
+
+
+
+```
+
+
+## Identify duplicates in the dataset
+```{r}
+# 
+duplicates <- d[duplicated(d[, c("country", "year")]), ]
+
+# Print duplicates
+print(duplicates)
+
+# Remove duplicate rows based on country and year
+d <- d[!duplicated(d[, c("country", "year")]), ]
+
+# Aggregate data by taking the mean for duplicate rows
+
+# Check again for duplicates
+any(duplicated(d[, c("country", "year")]))
+
+# Create a new variables of 'inequality'
+d$inequality <- d$top1 - d$bottom50
+library(ineq)
+d$theil_index <- ineq(c(d$top1, d$bottom50), type = "Theil")
+
+
+```
+
+##Create Inequality Variables 
+```{r}
+library(plm)
+
+d <- pdata.frame(d, index = c("country", "year"))
+d$inequality <- d$top1 - d$bottom50
+
+# Create the first-differenced variables of inequality measures
+d$t10b50ratio_diff <- ave(d$t10b50ratio, d$country, FUN = function(x) c(NA, diff(x)))
+
+d$inequality_diff <- ave(d$inequality, d$country, FUN = function(x) c(NA, diff(x)))
+
+# Remove rows where d$t10b50ratio_diff is NA
+d <- d[!is.na(d$t10b50ratio_diff), ]
+
+d$t10b50ratio <- d$top1 / d$bottom50
+
+```
+
+
+##Handling Missing GDP Data
+
+```{r}
+
+library(dplyr)
+
+# Function to fill missing values using exponential growth
+fill_gdp_growth <- function(x) {
+  for (i in seq_along(x)) {
+    if (is.na(x[i]) && i > 1) {
+      growth_rate <- mean(diff(log(x[!is.na(x)])), na.rm = TRUE) # Calculate average log growth rate
+      x[i] <- x[i - 1] * exp(growth_rate)  # Apply exponential growth
+    }
+  }
+  return(x)
+}
+
+# Apply the function by country
+d <- d %>%
+  group_by(country) %>%
+  mutate(gdp_pervdem = fill_gdp_growth(gdp_pervdem))
+
+# Apply the function by country
+d <- d %>%
+  group_by(country) %>%
+  mutate(e_gdppc_sd = fill_gdp_growth(e_gdppc_sd))
+
+
+
+
+```
+
+
+##Ddescriptives
+```{r}
+ 
+library(stargazer)
+library(dplyr)
+
+# Generate descriptive statistics
+descriptive_stats <- data.frame(
+  Variable = c(
+    "Social Polarization", "Income Inequality", "Resource Distribution",
+    "Participatory Democracy", "Trade Openness", "Political Polarization",
+    "Top 10% Income Share", "GDP per Capita", "Top 10% / Bottom 50% Ratio"
+  ),
+  Obs = c(
+    sum(!is.na(d$socpol)),
+    sum(!is.na(d$inequality)),
+    sum(!is.na(d$resources_distribution)),
+    sum(!is.na(d$participatory_democracy)),
+    sum(!is.na(d$trade_openness)),
+    sum(!is.na(d$polarization)),
+    sum(!is.na(d$top10)),
+    sum(!is.na(d$gdp_pervdem)),
+    sum(!is.na(d$t10b50ratio))
+  ),
+  Mean = c(
+    mean(d$socpol, na.rm = TRUE),
+    mean(d$inequality, na.rm = TRUE),
+    mean(d$resources_distribution, na.rm = TRUE),
+    mean(d$participatory_democracy, na.rm = TRUE),
+    mean(d$trade_openness, na.rm = TRUE),
+    mean(d$polarization, na.rm = TRUE),
+    mean(d$top10, na.rm = TRUE),
+    mean(d$gdp_pervdem, na.rm = TRUE),
+    mean(d$t10b50ratio, na.rm = TRUE)
+  ),
+  Std_Dev = c(
+    sd(d$socpol, na.rm = TRUE),
+    sd(d$inequality, na.rm = TRUE),
+    sd(d$resources_distribution, na.rm = TRUE),
+    sd(d$participatory_democracy, na.rm = TRUE),
+    sd(d$trade_openness, na.rm = TRUE),
+    sd(d$polarization, na.rm = TRUE),
+    sd(d$top10, na.rm = TRUE),
+    sd(d$gdp_pervdem, na.rm = TRUE),
+    sd(d$t10b50ratio, na.rm = TRUE)
+  ),
+  Min = c(
+    min(d$socpol, na.rm = TRUE),
+    min(d$inequality, na.rm = TRUE),
+    min(d$resources_distribution, na.rm = TRUE),
+    min(d$participatory_democracy, na.rm = TRUE),
+    min(d$trade_openness, na.rm = TRUE),
+    min(d$polarization, na.rm = TRUE),
+    min(d$top10, na.rm = TRUE),
+    min(d$gdp_pervdem, na.rm = TRUE),
+    min(d$t10b50ratio, na.rm = TRUE)
+  ),
+  Max = c(
+    max(d$socpol, na.rm = TRUE),
+    max(d$inequality, na.rm = TRUE),
+    max(d$resources_distribution, na.rm = TRUE),
+    max(d$participatory_democracy, na.rm = TRUE),
+    max(d$trade_openness, na.rm = TRUE),
+    max(d$polarization, na.rm = TRUE),
+    max(d$top10, na.rm = TRUE),
+    max(d$gdp_pervdem, na.rm = TRUE),
+    max(d$t10b50ratio, na.rm = TRUE)
+  )
+)
+
+# Round numeric values for readability
+descriptive_stats <- descriptive_stats %>%
+  mutate(across(where(is.numeric), round, 2))
+
+# Generate HTML table using stargazer
+stargazer(
+  descriptive_stats,
+  type = "html",
+  summary = FALSE,
+  title = "Table A1. Descriptive Statistics",
+  digits = 2,
+  out = "Descriptive_Statistics_Table.html"
+)
+
+
+```
+
+
+
+##Check Multicollinearity
+
+```{r}
+# Load necessary libraries
+library(car)
+library(corrplot)
+
+# Fit your linear model
+model_lm <- lm(socpol ~ lag(socpol, 1) + inequality + resources_distribution + 
+                 participatory_democracy + trade_openness + polarization + 
+                 top10 + gdp_pervdem, data = d)
+
+# Calculate VIF values
+vif_values <- vif(model_lm)
+
+# Assign descriptive names to VIF values
+names(vif_values) <- c("Lagged Social Polarization", "Income Inequality", "Resource Distribution", 
+                       "Participatory Democracy", "Trade Openness", "Political Polarization", 
+                       "Top 10% Income Share", "GDP per Capita")
+
+# Adjust margins to make space for longer variable names
+par(mar = c(5, 12, 4, 2))  # Bottom, Left, Top, Right margins
+
+# Plot VIF values with properly visible names
+barplot(vif_values, 
+        main = "Variance Inflation Factor (VIF) for Model Variables",
+        horiz = TRUE, 
+        col = "skyblue",
+        xlab = "VIF Value", 
+        las = 1,  # Make axis labels horizontal
+        names.arg = names(vif_values),  # Use descriptive names
+        cex.names = 0.8)  # Adjust label size if needed
+
+# Add threshold lines for VIF
+abline(v = 5, col = "orange", lty = 2, lwd = 2)  # Moderate multicollinearity
+abline(v = 10, col = "red", lty = 2, lwd = 2)    # Severe multicollinearity
+
+
+```
+
+
+
+
+
+#2. Models
+##FE** Model
+
+```{r}
+library(plm)
+
+# Fixed Effects Model
+model_fe <- plm(socpol ~ lag(socpol, 1) + inequality + resources_distribution + participatory_democracy + trade_openness + polarization + top10 + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(model_fe)
+
+#Ljung-Box Q-Test for Serial Correlation in Residuals
+Box.test(resid(model_fe), type = "Ljung-Box", lag = 1)
+
+# Fit residual model to check for serial correlation
+residuals_fe <- resid(model_fe)
+
+# Breusch-Godfrey LM Test
+bgtest(model_fe, order = 1)  # Order = 1 for first-order serial correlation
+
+# Perform Arellano-Bond test for autocorrelation
+pbgtest(model_fe, order = 1)  # Test for first-order autocorrelation
+pbgtest(model_fe, order = 2)  # Test for second-order autocorrelation
+
+
+#Testing for Heteroskedasticity
+
+plmtest(model_fe, type = "bp")
+
+#Breusch-Pagan Lagrange Multiplier (LM) test for heteroskedasticity yielded a p-value of 0.5031, which is well above 0.05. This suggests that there is no strong evidence of heteroskedasticity in your model. In other words, the variance of the residuals does not appear to systematically vary across observations.
+```
+
+
+```{r}
+# Load required packages
+library(plm)
+library(lmtest)
+library(ggplot2)
+
+#  Breusch-Godfrey LM Test
+bp_test <-bgtest(model_fe, order = 1)
+
+# Extract residuals and fitted values
+residuals_fe <- resid(model_fe)
+fitted_values_fe <- fitted(model_fe)
+
+# Create a dataframe for plotting
+df_plot <- data.frame(Fitted_Values = fitted_values_fe, Residuals = residuals_fe)
+
+# Plot residuals vs. fitted values
+ggplot(df_plot, aes(x = Fitted_Values, y = Residuals)) +
+  geom_point(color = "blue", alpha = 0.5) +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  theme_minimal() +
+  labs(title = "Residuals vs. Fitted Values (Breusch-Pagan Test)",
+       subtitle = paste("BP Test p-value:0.5031", round(bp_test$p.value, 3)),
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, face = "italic"))
+
+
+```
+
+
+```{r}
+# Load required libraries
+library(plm)
+library(lmtest)
+library(ggplot2)
+library(grid)  # Base R for combining plots
+library(gridExtra)  # Already in base R installations
+
+# Function to perform Breusch-Godfrey test and plot residuals for each model
+plot_residuals_vs_fitted <- function(model, model_name) {
+  # Perform Breusch-Godfrey LM Test
+  bp_test <- bgtest(model, order = 1)
+  
+  # Extract residuals and fitted values
+  residuals_model <- resid(model)
+  fitted_values_model <- fitted(model)
+  
+  # Create a dataframe for plotting
+  df_plot <- data.frame(Fitted_Values = fitted_values_model, Residuals = residuals_model)
+  
+  # Plot residuals vs. fitted values
+  p <- ggplot(df_plot, aes(x = Fitted_Values, y = Residuals)) +
+    geom_point(color = "blue", alpha = 0.5) +
+    geom_smooth(method = "loess", color = "red", se = FALSE) +
+    theme_minimal() +
+    labs(
+      title = paste("Residuals vs. Fitted (", model_name, ")", sep = ""),
+      subtitle = paste("BG Test p-value:", round(bp_test$p.value, 3)),
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5, face = "italic")
+    )
+  
+  return(p)
+}
+
+# Generate plots for each model
+plot_model_fe <- plot_residuals_vs_fitted(model_fe, "Model 1")
+plot_model_fe1 <- plot_residuals_vs_fitted(model_fe1, "Model 2")
+plot_model_fe2 <- plot_residuals_vs_fitted(model_fe2, "Model 3")
+plot_model_fe_int2 <- plot_residuals_vs_fitted(model_fe_int2, "Model 4")
+
+# Combine all plots using gridExtra (comes with base R)
+plotres3 <- grid.arrange(
+  plot_model_fe, plot_model_fe1,
+  plot_model_fe2, plot_model_fe_int2,
+  ncol = 2,  # 2 columns for side-by-side plots
+  top = "Residuals vs Fitted Values for All Models"
+)
+
+
+ggsave("plotres3.pdf", plot = plotres3, device = "pdf", width = 6, height = 4)
+
+
+
+
+```
+
+
+
+
+
+
+###Plot autocorrelation tests
+
+```{r}
+library(ggplot2)
+
+# Extract residuals
+residuals_fe <- resid(model_fe)
+
+# Create a dataframe for plotting
+df_residuals <- data.frame(Time = 1:length(residuals_fe), Residuals = residuals_fe)
+
+# Plot residuals over time
+ggplot(df_residuals, aes(x = Time, y = Residuals)) +
+  geom_line(color = "blue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "solid") +
+  labs(title = "Residual Time Series Plot",
+       x = "Time",
+       y = "Residuals") +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+# Get fitted values
+fitted_values <- fitted(model_fe)
+
+# Create dataframe
+df_resid_fitted <- data.frame(Fitted = fitted_values, Residuals = residuals_fe)
+
+# Scatter plot
+ggplot(df_resid_fitted, aes(x = Fitted, y = Residuals)) +
+  geom_point(color = "blue", alpha = 0.5) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  labs(title = "Residuals vs. Fitted Values (Heteroskedasticity Check)",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+
+
+```
+
+```{r}
+# Run tests
+ljung_box <- Box.test(residuals_fe, type = "Ljung-Box", lag = 1)$p.value
+breusch_godfrey <- bgtest(model_fe, order = 1)$p.value
+arellano_bond_1 <- pbgtest(model_fe, order = 1)$p.value
+arellano_bond_2 <- pbgtest(model_fe, order = 2)$p.value
+bp_test <- plmtest(model_fe, type = "bp")$p.value
+
+# Create dataframe
+df_tests <- data.frame(
+  Test = c("Ljung-Box", "Breusch-Godfrey", "Arellano-Bond 1st", 
+           "Arellano-Bond 2nd", "Breusch-Pagan"),
+  P_Value = c(ljung_box, breusch_godfrey, arellano_bond_1, arellano_bond_2, bp_test)
+)
+
+# Plot
+plotres4 <- ggplot(df_tests, aes(x = Test, y = P_Value, fill = Test)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
+  labs(title = "Autocorrelation and Heteroskedasticity Tests",
+       y = "P-Value",
+       x = "Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+ggsave("plotres4.pdf", plot = plotres4, device = "pdf", width = 6, height = 4)
+
+
+```
+The results from the plotted p-values of serial correlation and heteroskedasticity tests provide key insights into model diagnostics:
+
+Serial Correlation:
+
+The Arellano-Bond test has a p-value above 0.05, indicating no significant second-order serial correlation.
+The Breusch-Godfrey test also shows a p-value above 0.05, suggesting that serial correlation is not detected at conventional significance levels.
+The Ljung-Box test has a p-value close to 0.05, indicating marginal evidence of serial correlation, though not strongly significant.
+Heteroskedasticity:
+
+The Breusch-Pagan test has a high p-value, meaning there is no strong evidence of heteroskedasticity in the residuals.
+
+
+##FE** Resource Distribution
+
+```{r}
+# Fixed Effects Model
+model_fe1 <- plm(socpol ~ lag(socpol, 1) + inequality + resources_distribution + inequality:resources_distribution + participatory_democracy + trade_openness + polarization + top10 + gdp_pervdem,
+  data = d,
+  index = c("country", "year"),
+  model = "within"  # Fixed effects model
+)
+# Summary of the Fixed Effects Model
+summary(model_fe1)
+
+
+
+#Ljung-Box Q-Test for Serial Correlation in Residuals
+Box.test(resid(model_fe1), type = "Ljung-Box", lag = 1)
+
+# Fit residual model to check for serial correlation
+residuals_fe <- resid(model_fe1)
+
+# Breusch-Godfrey LM Test
+bgtest(model_fe1, order = 1)  # Order = 1 for first-order serial correlation
+
+# Perform Arellano-Bond test for autocorrelation
+pbgtest(model_fe1, order = 1)  # Test for first-order autocorrelation
+pbgtest(model_fe1, order = 2)  # Test for second-order autocorrelation
+
+
+#Testing for Heteroskedasticity
+
+plmtest(model_fe1, type = "bp")
+
+```
+
+
+
+
+##FE** democracy:polarization
+```{r}
+# Fixed Effects Model
+model_fe2 <- plm(socpol ~ lag(socpol, 1) + inequality + top10 + resources_distribution + participatory_democracy*polarization + trade_openness  + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(model_fe2)
+
+
+#TESTS
+
+#Ljung-Box Q-Test for Serial Correlation in Residuals
+Box.test(resid(model_fe2), type = "Ljung-Box", lag = 1)
+
+# Fit residual model to check for serial correlation
+residuals_fe <- resid(model_fe2)
+
+# Breusch-Godfrey LM Test
+bgtest(model_fe2, order = 1)  # Order = 1 for first-order serial correlation
+
+# Perform Arellano-Bond test for autocorrelation
+pbgtest(model_fe2, order = 1)  # Test for first-order autocorrelation
+pbgtest(model_fe2, order = 2)  # Test for second-order autocorrelation
+
+
+#Testing for Heteroskedasticity
+
+plmtest(model_fe2, type = "bp")
+
+
+
+
+
+
+```
+
+
+
+
+##FE** pol:top1
+
+```{r}
+# Fixed Effects Model
+model_fe_int2 <- plm(socpol ~ lag(socpol, 1) + top10:polarization + inequality + top10 + resources_distribution + polarization + participatory_democracy + trade_openness + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(model_fe_int2)
+
+#Ljung-Box Q-Test for Serial Correlation in Residuals
+Box.test(resid(model_fe_int2), type = "Ljung-Box", lag = 1)
+
+# Fit residual model to check for serial correlation
+residuals_fe <- resid(model_fe_int2)
+
+# Breusch-Godfrey LM Test
+bgtest(model_fe_int2, order = 1)  # Order = 1 for first-order serial correlation
+
+# Perform Arellano-Bond test for autocorrelation
+pbgtest(model_fe_int2, order = 1)  # Test for first-order autocorrelation
+pbgtest(model_fe_int2, order = 2)  # Test for second-order autocorrelation
+
+
+#Testing for Heteroskedasticity
+
+plmtest(model_fe_int2, type = "bp")
+
+
+```
+
+
+
+#3. Robustness Models with different inequality measurement 
+
+##Model 1
+
+```{r}
+# Fixed Effects Model
+r_model_fe <- plm(socpol ~ lag(socpol, 1) + t10b50ratio + resources_distribution + participatory_democracy + trade_openness + polarization + top10 + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(r_model_fe) 
+
+```
+
+##Model 2
+
+```{r}
+r_model_fe1 <- plm(socpol ~ lag(socpol, 1) + t10b50ratio + resources_distribution + t10b50ratio:resources_distribution + participatory_democracy + trade_openness + polarization + top10 + gdp_pervdem,
+  data = d,
+  index = c("country", "year"),
+  model = "within"  # Fixed effects model
+)
+
+# Summary of the Fixed Effects Model
+summary(r_model_fe1) 
+```
+
+
+##Model 3
+
+```{r}
+r_model_fe2 <- plm(socpol ~ lag(socpol, 1) + t10b50ratio + top10 + resources_distribution + participatory_democracy*polarization + trade_openness  + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(r_model_fe2) 
+```
+
+##Model 4
+
+```{r}
+r_model_fe_int2 <- plm(socpol ~ lag(socpol, 1) + top10:polarization + t10b50ratio + top10 + resources_distribution + polarization + participatory_democracy + trade_openness + gdp_pervdem,
+                data = d, 
+                index = c("country", "year"), 
+                model = "within")
+
+# Summary of the Fixed Effects Model
+summary(r_model_fe_int2)
+```
+
+
+### Tests
+
+
+```{r}
+# Load necessary libraries
+library(plm)
+library(lmtest)
+library(ggplot2)
+
+# List of models
+models <- list(
+  "r_model_fe" = r_model_fe,
+  "r_model_fe1" = r_model_fe1,
+  "r_model_fe2" = r_model_fe2,
+  "r_model_fe_int2" = r_model_fe_int2
+)
+
+# Loop through each model, run diagnostic tests, and save plots
+for (model_name in names(models)) {
+  model <- models[[model_name]]
+  
+  # Calculate residuals
+  residuals_fe <- residuals(model)
+  
+  # Run diagnostic tests
+  ljung_box <- Box.test(residuals_fe, type = "Ljung-Box", lag = 1)$p.value
+  breusch_godfrey <- bgtest(model, order = 1)$p.value
+  arellano_bond_1 <- pbgtest(model, order = 1)$p.value
+  arellano_bond_2 <- pbgtest(model, order = 2)$p.value
+  bp_test <- plmtest(model, type = "bp")$p.value
+  
+  # Create a dataframe for test results
+  df_tests <- data.frame(
+    Test = c("Ljung-Box", "Breusch-Godfrey", "Arellano-Bond 1st", 
+             "Arellano-Bond 2nd", "Breusch-Pagan"),
+    P_Value = c(ljung_box, breusch_godfrey, arellano_bond_1, arellano_bond_2, bp_test)
+  )
+  
+  # Create plot
+  plotres_ap2 <- ggplot(df_tests, aes(x = Test, y = P_Value, fill = Test)) +
+    geom_bar(stat = "identity", color = "black") +
+    geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
+    labs(
+      title = paste("Autorrelation and Heteroskedasticity Test"),
+      y = "P-Value",
+      x = "Test"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Save plot as PDF
+  filename <- paste0(model_name, "_diagnostic_tests.pdf")
+  ggsave(filename, plot = plotres_ap2, device = "pdf", width = 6, height = 4)
+}
+
+
+ggsave("plotres_ap2.pdf", plot = plotres_ap2, device = "pdf", width = 6, height = 4)
+
+```
+
+
+
+
+
+
+```{r}
+# Load required libraries
+library(plm)
+library(lmtest)
+library(ggplot2)
+library(grid)  # Base R for combining plots
+library(gridExtra)  # Already in base R installations
+
+# Function to perform Breusch-Godfrey test and plot residuals for each model
+plot_residuals_vs_fitted2 <- function(model, model_name) {
+  # Perform Breusch-Godfrey LM Test
+  bp_test2 <- bgtest(model, order = 1)
+  
+  # Extract residuals and fitted values
+  residuals_model2 <- resid(model)
+  fitted_values_model2 <- fitted(model)
+  
+  # Create a dataframe for plotting
+  df_plot <- data.frame(Fitted_Values = fitted_values_model2, Residuals = residuals_model2)
+  
+  # Plot residuals vs. fitted values
+  p <- ggplot(df_plot, aes(x = Fitted_Values, y = Residuals)) +
+    geom_point(color = "blue", alpha = 0.5) +
+    geom_smooth(method = "loess", color = "red", se = FALSE) +
+    theme_minimal() +
+    labs(
+      title = paste("Residuals vs. Fitted (", model_name, ")", sep = ""),
+      subtitle = paste("BG Test p-value:", round(bp_test$p.value, 3)),
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5, face = "italic")
+    )
+  
+  return(p)
+}
+
+
+#r_model_fe, r_model_fe1, r_model_fe2, r_model_fe_int2
+# Generate plots for each model
+plot_r_model_fe <- plot_residuals_vs_fitted(r_model_fe, "Model 1")
+plot_r_model_fe1 <- plot_residuals_vs_fitted(r_model_fe1, "Model 2")
+plot_r_model_fe2 <- plot_residuals_vs_fitted(r_model_fe2, "Model 3")
+plot_r_model_fe_int2 <- plot_residuals_vs_fitted(r_model_fe_int2, "Model 4")
+
+# Combine all plots using gridExtra (comes with base R)
+plotres_ap <- grid.arrange(
+  plot_r_model_fe, plot_r_model_fe1,
+  plot_r_model_fe2, plot_r_model_fe_int2,
+  ncol = 2,  # 2 columns for side-by-side plots
+  top = "Residuals vs Fitted Values for All Models"
+)
+
+
+ggsave("plotres_ap.pdf", plot = plotres_ap, device = "pdf", width = 6, height = 4)
+
+
+```
+
+
+
+##Tables
+
+
+
+```{r}
+
+# Load required libraries
+library(stargazer)
+
+# Define a function to rename covariates dynamically
+custom_variable_names <- function(models) {
+  names <- names(coef(models[[1]]))  # Extract variable names from the first model
+  names <- gsub("lag\\(socpol, 1\\)", "Lagged Social Polarization", names)
+  names <- gsub("inequality", "Income Inequality", names)
+  names <- gsub("resources_distribution", "Resource Distribution", names)
+  names <- gsub("lag\\(resources_distribution, 16\\)", "Lagged Resource Distribution (16)", names)
+  names <- gsub("participatory_democracy", "Participatory Democracy", names)
+  names <- gsub("polarization", "Political Polarization", names)
+  names <- gsub("top10", "Top 10% Income Share", names)
+  names <- gsub("trade_openness", "Trade Openness", names)
+  names <- gsub("barriers_to_parties", "Barriers to Party Entry", names)
+  names <- gsub("gdp_pervdem", "GDP per Capita", names)
+  names <- gsub("top10:polarization", "Top10 x Polarization Interaction", names)
+  return(names)
+}
+
+# List of models
+model_list <- list(model_fe, model_fe1, model_fe2, model_fe_int2)
+
+# Generate regression table using stargazer
+stargazer(model_fe, model_fe1, model_fe2, model_fe_int2,
+          type = "html",  # Change to "latex" for LaTeX output or "html" for Word
+          title = "Regression Results for Panel Models",
+          align = TRUE,
+          dep.var.labels = "Social Polarization (socpol)",
+          covariate.labels = custom_variable_names(model_list),  # Apply formatted names to all models
+          omit.stat = c("f", "ser"),
+          notes = "Standard errors are clustered at the country level.")
+ keep.stat = c("n", "rsq", "adj.rsq")
+ model.names = TRUE
+  notes.append = TRUE
+  star.cutoffs = c(0, 0.001, 0.01, 0.05, 0.1, 1)
+  omit = "year"
+  notes = "Signif. codes: 0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1"
+  out = "regression_result3.html"
+  omit.stat = NULL # Ensure this does not remove standard errors
+ add.lines = list(
+    c("Autocorrelation Test (1)", "-1.785 (p = 0.074)", "", "-0.233 (p = 0.816)"),
+    c("Autocorrelation Test (2)", "-0.858 (p = 0.391)", "", "-1.314 (p = 0.189)"),
+    c("Breusch-Pagan test:BP = 4.2215, df = 5, p-value = 0.518"),
+    c("Breusch-Pagan test:BP = 5.5048, df = 5, p-value = 0.3574")
+  )
+
+ 
+ stargazer(model_fe, model_fe1, model_fe2, model_fe_int2,
+          type = "html", 
+          out = "regression_results.html")
+
+
+
+
+```
+
+
+## Table for appendix models
+```{r}
+
+library(stargazer)
+
+# List of models
+model_list <- list(r_model_fe, r_model_fe1, r_model_fe2, r_model_fe_int2)
+
+# Generate regression table using stargazer
+stargazer(model_fe, model_fe1, model_fe2, model_fe_int2,
+          type = "html",  # Change to "latex" for LaTeX output or "html" for Word
+          title = "Regression Results for Panel Models",
+          align = TRUE,
+          dep.var.labels = "Social Polarization (socpol)",
+          covariate.labels = custom_variable_names(model_list),  # Apply formatted names to all models
+          omit.stat = c("f", "ser"),
+          notes = "Standard errors are clustered at the country level.")
+ keep.stat = c("n", "rsq", "adj.rsq")
+ model.names = TRUE
+  notes.append = TRUE
+  star.cutoffs = c(0, 0.001, 0.01, 0.05, 0.1, 1)
+  omit = "year"
+  notes = "Signif. codes: 0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1"
+  out = "regression_result3.html"
+  omit.stat = NULL # Ensure this does not remove standard errors
+ add.lines = list(
+    c("Autocorrelation Test (1)", "-1.785 (p = 0.074)", "", "-0.233 (p = 0.816)"),
+    c("Autocorrelation Test (2)", "-0.858 (p = 0.391)", "", "-1.314 (p = 0.189)"),
+    c("Breusch-Pagan test:BP = 4.2215, df = 5, p-value = 0.518"),
+    c("Breusch-Pagan test:BP = 5.5048, df = 5, p-value = 0.3574")
+  )
+
+ 
+ stargazer(r_model_fe, r_model_fe1, r_model_fe2, r_model_fe_int2,
+          type = "html", 
+          out = "appendix_regression_results.html")
+
+```
+
+
+
+
+
+
+##Some Plots
+
+##<- All variables 
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Filter dataset for years 2000–2023
+filtered_data <- d %>%
+  filter(year >= 2000 & year <= 2023) %>%
+  group_by(year) %>%
+  summarise(
+    Mean_Inequality = mean(inequality, na.rm = TRUE),
+    Mean_t10b50ratio = mean(t10b50ratio, na.rm = TRUE),
+    Mean_SocialPolarization = mean(socpol, na.rm = TRUE),
+    Mean_PoliticalPolarization = mean(polarization, na.rm = TRUE),
+    Mean_ResourceDistribution = mean(resources_distribution, na.rm = TRUE),
+    Mean_ParticipatoryDemocracy = mean(participatory_democracy, na.rm = TRUE),
+    Mean_Polyarchy = mean(polyarchy, na.rm = TRUE),
+    Mean_GDPperCapita = mean(gdp_pervdem, na.rm = TRUE)
+  )
+
+# Convert data to long format for easy plotting
+long_data <- filtered_data %>%
+  pivot_longer(
+    cols = starts_with("Mean_"),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+# Function to generate and save a time series plot for each variable
+generate_plot <- function(var_name, data) {
+  plot_data <- data %>% filter(Variable == var_name)
+  
+  plot <- ggplot(plot_data, aes(x = year, y = Value)) +
+    geom_line(size = 0.5, color = "steelblue") +
+    geom_point(size = 2, color = "steelblue") +
+    scale_x_continuous(
+      breaks = seq(2000, 2023, 1)  # Show every year
+    ) +
+    labs(
+      title = paste("Trend of", gsub("Mean_", "", var_name), "(2000-2023)"),
+      x = "Year",
+      y = "Mean Value"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+  
+  # Save plot as PDF
+  ggsave(
+    filename = paste0(gsub("Mean_", "", var_name), "_trend_plot_yearly.pdf"),
+    plot = plot,
+    width = 8,
+    height = 5
+  )
+  
+  return(plot)
+}
+
+# Generate and display plots for each variable
+unique_vars <- unique(long_data$Variable)
+plots <- lapply(unique_vars, generate_plot, data = long_data)
+
+# Display all plots (optional)
+for (p in plots) {
+  print(p)
+}
+
+```
+
+
+
+```{r}
+
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+# Add labels for specific years
+difference_fluctuation <- d %>%
+  filter(year >= 2000 & year <= 2023) %>%
+  group_by(year) %>%
+  summarise(SD_Top10_Bottom50_Diff = sd(inequality, na.rm = TRUE)) %>%
+  mutate(
+    label = ifelse(year %in% c(2008, 2020), 
+                   ifelse(year == 2008, "2008 Financial Crisis", "COVID-19 Pandemic"), NA)
+  )
+
+# Plot with labeled points
+difference_fluctuation_plot <- ggplot(difference_fluctuation, aes(x = year, y = SD_Top10_Bottom50_Diff)) +
+  geom_line(color = "blue", size = 0.5) +
+  geom_point(color = "blue", size = 2) +
+  geom_text_repel(aes(label = label), size = 3, color = "black", max.overlaps = 10) +  # Add labels
+  scale_x_continuous(
+    breaks = seq(2000, 2023, 1)
+  ) +
+  labs(
+    title = "Fluctuation of Top 10% - Bottom 50% Difference (2000-2023)",
+    x = "Year",
+    y = "Standard Deviation (Difference)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Display plot
+print(difference_fluctuation_plot)
+
+# Save plot
+ggsave("difference_fluctuation_with_labels.pdf", plot = difference_fluctuation_plot, width = 10, height = 6)
+
+
+# Add labels for specific years
+ratio_fluctuation <- d %>%
+  filter(year >= 2000 & year <= 2023) %>%
+  group_by(year) %>%
+  summarise(SD_Top10_Bottom50_Ratio = sd(t10b50ratio, na.rm = TRUE)) %>%
+  mutate(
+    label = ifelse(year %in% c(2008, 2020), 
+                   ifelse(year == 2008, "2008 Financial Crisis", "COVID-19 Pandemic"), NA)
+  )
+
+# Plot with labeled points
+ratio_fluctuation_plot <- ggplot(ratio_fluctuation, aes(x = year, y = SD_Top10_Bottom50_Ratio)) +
+  geom_line(color = "red", size = 0.5) +
+  geom_point(color = "red", size = 2) +
+  geom_text_repel(aes(label = label), size = 3, color = "black", max.overlaps = 10) +  # Add labels
+  scale_x_continuous(
+    breaks = seq(2000, 2023, 1)
+  ) +
+  labs(
+    title = "Fluctuation of Top 10% / Bottom 50% Ratio (2000-2023)",
+    x = "Year",
+    y = "Standard Deviation (Ratio)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Display plot
+print(ratio_fluctuation_plot)
+
+# Save plot
+ggsave("ratio_fluctuation_with_labels.pdf", plot = ratio_fluctuation_plot, width = 10, height = 6)
+```
+
+
+
+
+
+
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(ggrepel)  # For better label positioning
+
+# Filter dataset for years 2000–2023
+filtered_data <- d %>%
+  filter(year >= 2000 & year <= 2023) %>%
+  group_by(year) %>%
+  summarise(
+    Mean_TradeOpenness = mean(trade_openness, na.rm = TRUE)
+  ) %>%
+  mutate(
+    label_trade = ifelse(year %in% c(2008, 2020),
+                         ifelse(year == 2008, "2008 Financial Crisis", "COVID-19 Pandemic"), NA)
+  )
+
+# Plot: Trade Openness Over Time with Labels
+trade_openness_plot <- ggplot(filtered_data, aes(x = year, y = Mean_TradeOpenness)) +
+  geom_line(color = "darkgreen", size = 0.5) +
+  geom_point(color = "darkgreen", size = 1) +
+  geom_text_repel(aes(label = label_trade), size = 3, color = "black", max.overlaps = 10) +  # Add event labels
+  scale_x_continuous(
+    breaks = seq(2000, 2023, 1)  # Display every year
+  ) +
+  labs(
+    title = "Trend of Trade Openness (2000-2023)",
+    x = "Year",
+    y = "Mean Trade Openness (Exports + Imports / GDP)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels for clarity
+  )
+
+# Display the plot
+print(trade_openness_plot)
+
+# Save the plot as a PDF
+ggsave("trade_openness_trend_plot_yearly.pdf", plot = trade_openness_plot, width = 8, height = 5)
+
+```
+
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(ggrepel)  # For better label positioning
+
+# Filter dataset for years 2000–2023
+filtered_data <- d %>%
+  filter(year >= 2000 & year <= 2023) %>%
+  group_by(year) %>%
+  summarise(
+    Mean_Top10 = mean(top10, na.rm = TRUE)
+  ) %>%
+  mutate(
+    label_events = ifelse(year %in% c(2008, 2020),
+                          ifelse(year == 2008, "2008 Financial Crisis", "COVID-19 Pandemic"), NA)
+  )
+
+# Plot: Top 10% Income Share Over Time
+top10_plot <- ggplot(filtered_data, aes(x = year, y = Mean_Top10)) +
+  geom_line(color = "darkblue", size = 0.8) +
+  geom_point(color = "darkblue", size = 1) +
+  geom_text_repel(
+    aes(label = label_events),
+    size = 3, color = "black", max.overlaps = 10
+  ) +  # Add event labels
+  scale_x_continuous(
+    breaks = seq(2000, 2023, 1)  # Display every year
+  ) +
+  labs(
+    title = "Trend of Top 10% Income Share (2000-2023)",
+    x = "Year",
+    y = "Mean Income Share (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Display the plot
+print(top10_plot)
+
+# Save the plot as a PDF
+ggsave("top10_income_share_trend_plot.pdf", plot = top10_plot, width = 8, height = 5)
+
+```
+
+
+
+
+
+
+##<- Bootstraping
+
+```{r}
+
+# Extract residuals from the model
+residuals_fe <- residuals(model_fe)
+
+# Bootstrap function to resample residuals
+boot_residuals <- function(data, indices) {
+  resampled_residuals <- residuals_fe[indices]
+  return(shapiro.test(resampled_residuals)$statistic)  # Shapiro-Wilk test for normality
+}
+
+# Run bootstrapping with 1000 replications
+set.seed(123)
+boot_results_residuals <- boot(data = residuals_fe, statistic = boot_residuals, R = 1000)
+
+# Plot bootstrapped residuals
+plotres <-ggplot(data = data.frame(residuals_fe), aes(x = residuals_fe)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.5) +
+  geom_density(color = "red") +
+  ggtitle("Bootstrapped Residual Distribution of Model 1") +
+  xlab("Residuals") +
+  ylab("Density") +
+  theme_minimal()
+
+ggsave("plotres.pdf", plot = plotres, device = "pdf", width = 6, height = 4)
+
+```
+
+
+
+
+
+
+
+
+```{r}
+# Define the bootstrap function (resampling at the country level)
+boot_fe_panel <- function(data, indices) {
+  # Get unique country IDs
+  unique_countries <- unique(data$country)
+
+  # Resample country-level IDs with replacement
+  sampled_countries <- unique_countries[indices]
+
+  # Filter data to keep only the resampled countries (keeping all years)
+  d_sample <- data %>% filter(country %in% sampled_countries)
+
+  # Convert resampled data into panel format
+  d_sample <- pdata.frame(d_sample, index = c("country", "year"))
+
+  # Run the fixed effects model
+  model_b <- plm(socpol ~ lag(socpol, 1) + inequality + resources_distribution +
+                 participatory_democracy + trade_openness + polarization +
+                 top10 + gdp_pervdem,
+               data = d_sample, model = "within")
+
+  # Return the estimated coefficients
+  return(coef(model_b))
+}
+
+
+```
+
+
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Perform bootstrapping at the country level
+boot_results <- boot(data = d, statistic = boot_fe_panel, R = 1000, 
+                     strata = d$country)  # Ensures country-level resampling
+
+# Print bootstrap summary
+print(boot_results)
+
+```
+
+
+```{r}
+# Compute 95% confidence intervals for each coefficient
+boot_ci <- boot.ci(boot_results, type = "perc")
+
+# Print confidence intervals
+print(boot_ci)
+
+```
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Create a mapping of variable names to more readable labels
+variable_labels <- c(
+  "gdp_pervdem" = "GDP per Capita",
+  "inequality" = "Inequality",
+  "lag(socpol, 1)" = "Lagged Social Polarization",
+  "participatory_democracy" = "Participatory Democracy",
+  "polarization" = "Political Polarization",
+  "resources_distribution" = "Resources Distribution",
+  "top10" = "Top 10% Income Share",
+  "trade_openness" = "Trade Openness"
+)
+
+# Convert data for plotting and apply readable labels
+boot_estimates_long <- boot_estimates %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Estimate") %>%
+  mutate(Variable = factor(Variable, levels = names(variable_labels), labels = variable_labels))
+
+# Plot bootstrap coefficient distributions with readable variable names
+plotres2 <- ggplot(boot_estimates_long, aes(x = Estimate)) +
+  geom_histogram(fill = "blue", bins = 30, alpha = 0.5) +
+  facet_wrap(~ Variable, scales = "free") +
+  ggtitle("Bootstrap Distributions of Coefficients") +
+  theme_minimal()
+
+
+ggsave("plotres2.pdf", plot = plotres2, device = "pdf", width = 6, height = 4)
+
+```
+
+
+
+## Sub-Group: High Low Inequality
+
+### <- Split Data into High and Low Inequality Groups
+
+```{r}
+library(dplyr)
+library(boot)
+library(plm)
+
+# Compute median inequality score
+median_inequality <- median(d$inequality, na.rm = TRUE)
+
+# Split dataset into High and Low Inequality groups
+d_high_inequality <- d %>% filter(inequality > median_inequality)  # High inequality countries
+d_low_inequality <- d %>% filter(inequality <= median_inequality)  # Low inequality countries
+
+# Check the number of countries in each group
+cat("Number of High Inequality Countries:", length(unique(d_high_inequality$country)), "\n")
+cat("Number of Low Inequality Countries:", length(unique(d_low_inequality$country)), "\n")
+
+
+```
+
+###<-Define the Panel-Based Bootstrapping Function
+
+```{r}
+
+boot_fe_panel <- function(data, indices) {
+  # Get unique country IDs
+  unique_countries <- unique(data$country)
+  
+  # Resample country-level IDs with replacement
+  sampled_countries <- unique_countries[indices]
+  
+  # Filter data to keep only the resampled countries (keeping all years)
+  d_sample <- data %>% filter(country %in% sampled_countries)
+  
+  # Convert resampled data into panel format
+  d_sample <- pdata.frame(d_sample, index = c("country", "year"))
+  
+  # Run the fixed effects model
+  model <- plm(socpol ~ lag(socpol, 1) + inequality + resources_distribution +
+                 participatory_democracy + trade_openness + polarization +
+                 top10 + gdp_pervdem,
+               data = d_sample, model = "within")
+  
+  # Return the estimated coefficients
+  return(coef(model))
+}
+
+```
+
+###<-Perform Bootstrapping for High and Low Inequality Groups
+
+```{r}
+set.seed(123)
+
+# Bootstrapping for high inequality countries
+boot_high_inequality <- boot(data = d_high_inequality, statistic = boot_fe_panel, 
+                            R = 1000, strata = d_high_inequality$country)
+
+# Bootstrapping for low inequality countries
+boot_low_inequality <- boot(data = d_low_inequality, statistic = boot_fe_panel, 
+                           R = 1000, strata = d_low_inequality$country)
+
+# Print bootstrap summaries 
+print(boot_high_inequality)
+print(boot_low_inequality)
+
+```
+
+
+
+
+###<- Compute Confidence Intervals for Each Group
+
+```{r}
+# Confidence Intervals for High Inequality Countries
+boot_ci_high_ineq <- boot.ci(boot_high_inequality, type = "perc")
+print(boot_ci_high_ineq) 
+
+# Confidence Intervals for Low Inequality Countries
+boot_ci_low_ineq <- boot.ci(boot_low_inequality, type = "perc")
+print(boot_ci_low_ineq)
+
+
+
+```
+
+###<-Compare Bootstrapped Coefficients Across Subgroups
+
+```{r}
+# Extract bootstrapped coefficient estimates
+boot_high_df <- as.data.frame(boot_high_inequality$t)
+boot_low_df <- as.data.frame(boot_low_inequality$t)
+
+# Name columns based on model variables
+colnames(boot_high_df) <- names(coef(model_fe))
+colnames(boot_low_df) <- names(coef(model_fe))
+ 
+# Compute mean estimates for each group
+summary_high_ineq <- apply(boot_high_df, 2, function(x) c(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+summary_low_ineq <- apply(boot_low_df, 2, function(x) c(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+
+# Print results
+cat("\nHigh Inequality Countries:\n")
+print(summary_high_ineq)
+
+cat("\nLow Inequality Countries:\n")
+print(summary_low_ineq)
+
+
+```
+
+
+###<-Visualizing Bootstrapped Coefficients for High vs. Low Inequality
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+# Convert bootstrapped results to long format for plotting
+boot_high_long <- pivot_longer(boot_high_df, cols = everything(), names_to = "Variable", values_to = "Estimate")
+boot_low_long <- pivot_longer(boot_low_df, cols = everything(), names_to = "Variable", values_to = "Estimate")
+
+# Add group labels
+boot_high_long$Group <- "High Inequality"
+boot_low_long$Group <- "Low Inequality"
+
+# Combine data
+boot_combined <- rbind(boot_high_long, boot_low_long)
+
+# Plot bootstrapped coefficient distributions for High vs. Low Inequality
+plot5 <- ggplot(boot_combined, aes(x = Estimate, fill = Group)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ Variable, scales = "free") +
+  ggtitle("Bootstrapped Coefficients: High vs. Low Inequality Countries") +
+  theme_minimal()
+
+# Print the plot
+print(plot_ineq)
+
+ggsave("plot5.pdf", plot = plot5, device = "pdf", width = 6, height = 4)
+
+
+```
+
+
+
+```{r}
+# Define values manually based on your bootstrap outputs
+high_inequality <- data.frame(
+  Variable = c("Lag(SocPol, 1)", "Inequality", "Resources Distribution", 
+               "Participatory Democracy", "Trade Openness", "Polarization", "Top 10", "GDP per Capita"),
+  Mean = c(0.7185, -1.8587, 0.1049, -0.3170, -0.0712, -0.1918, 1.8962, -0.0060),
+  SD = c(0.0566, 0.7282, 0.4693, 0.4572, 0.1100, 0.0459, 0.9969, 0.0029),
+  CI_Lower = c(0.6004, -2.587, 0.021, -0.791, -0.153, -0.265, 1.120, -0.0095),
+  CI_Upper = c(0.8150, -1.130, 0.280, 0.157, 0.010, -0.118, 2.680, -0.0025)
+)
+
+low_inequality <- data.frame(
+  Variable = c("Lag(SocPol, 1)", "Inequality", "Resources Distribution", 
+               "Participatory Democracy", "Trade Openness", "Polarization", "Top 10", "GDP per Capita"),
+  Mean = c(0.8874, 0.8472, 0.3088, -0.3939, 0.0463, -0.0502, -0.1093, -0.0072),
+  SD = c(0.0361, 1.4897, 0.4379, 0.3664, 0.1205, 0.0457, 1.6982, 0.0054),
+  CI_Lower = c(0.8143, 0.310, 0.200, -0.880, -0.072, -0.108, -0.759, -0.0105),
+  CI_Upper = c(0.9506, 1.420, 0.450, 0.091, 0.120, 0.003, 0.540, -0.0035)
+)
+
+```
+
+
+
+```{r}
+# Merge high and low inequality results
+combined_results <- cbind(high_inequality, low_inequality[,-1])
+
+# Rename columns for clarity
+colnames(combined_results) <- c("Variable", "Mean_High", "SD_High", "CI_Lower_High", "CI_Upper_High",
+                                "Mean_Low", "SD_Low", "CI_Lower_Low", "CI_Upper_Low")
+
+# Print the final table
+print(combined_results, row.names = FALSE)
+
+```
+
+
+```{r}
+# Save as CSV
+write.csv(combined_results, "bootstrap_results.csv", row.names = FALSE)
+
+# Save as a text file for copying to Word
+write.table(combined_results, "bootstrap_results.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+
+
